@@ -1,125 +1,110 @@
 <p align="center">
-  <a href="https://anza.xyz">
-    <img alt="Anza" src="https://i.postimg.cc/VkKTnMM9/agave-logo-talc-1.png" width="250" />
+  <a href="https://www.gorbagana.wtf">
+    <img alt="Gorbagana" src="https://www.gorbagana.wtf/images/gorbagio-g.avif" width="320" />
   </a>
 </p>
 
-[![Agave validator](https://img.shields.io/crates/v/agave-validator.svg)](https://crates.io/crates/agave-validator)
-[![Agave documentation](https://docs.rs/agave-validator/badge.svg)](https://docs.rs/agave-validator)
-[![Build status](https://badge.buildkite.com/b2b925facfdbb575573084bb4b7e1f1ce7f395239672941bf7.svg?branch=master)](https://buildkite.com/anza/agave-secondary)
-[![Release status](https://github.com/anza-xyz/agave/actions/workflows/release.yml/badge.svg)](https://github.com/anza-xyz/agave/actions/workflows/release.yml)
-[![codecov](https://codecov.io/gh/anza-xyz/agave/branch/master/graph/badge.svg)](https://codecov.io/gh/anza-xyz/agave)
+<h1 align="center">THE TRASH CHAIN</h1>
+
+<p align="center">
+  <a href="https://www.gorbagana.wtf/#what-is-gor">Website</a> ·
+  <a href="https://docs.gorbagana.wtf/">Docs</a> ·
+  <a href="https://docs.gorbagana.wtf/">Explorer &amp; Tools</a>
+</p>
+
+# What is Gorbagana?
+
+Gorbagana is a high-performance blockchain network forked from Solana's
+codebase, designed to combine meme-culture energy with serious infrastructure
+capabilities — it's all trash!
+
+Most chains are centralized, have insider MEV, and are exploitable to an extent.
+Gorbagana flips the idea of a "trash chain" on its head: it **embraces
+centralization transparently** and gives the power back to the community to use
+it for games, fun experiments, and fair on-chain mechanics.
+
+## The technical trash
+
+Built on Solana's proven architecture, Gorbagana inherits:
+
+- **Proof of History (PoH)** — a cryptographic clock for transaction ordering
+- **Tower BFT** — Byzantine Fault Tolerance optimized for PoH
+- **Turbine** — block propagation protocol for fast network communication
+- **Gulf Stream** — mempool-less transaction forwarding
+- **Sealevel** — parallel smart-contract runtime for high throughput
+- **Pipelining** — transaction processing across validation stages
+
+## Key network characteristics
+
+- **Native currency:** `$GOR`
+- **Speed:** sub-second finality with high throughput
+- **Smart contracts:** full compatibility with the Solana Program Library (SPL) — soon the Trash Program Library (TPL)
+- **Block time:** lower than Solana, produced by a single network validator
+- **Fees:** minimal transaction costs paid in `$GOR`
+
+## Current state
+
+Gorbagana currently runs on **Testnet v1** — a stable, production-ready test
+environment processing real transactions — while the team prepares **Testnet v2
+(Devnet)** and finally **Mainnet**. See the
+[Network History](https://docs.gorbagana.wtf/) for the full timeline.
 
 # Building
 
-## **1. Install rustc, cargo and rustfmt.**
+## 1. Install rustc, cargo and rustfmt
 
 ```bash
-$ curl https://sh.rustup.rs -sSf | sh
-$ source $HOME/.cargo/env
-$ rustup component add rustfmt
+curl https://sh.rustup.rs -sSf | sh
+source $HOME/.cargo/env
+rustup component add rustfmt
 ```
 
-The `rust-toolchain.toml` file pins a specific rust version and ensures that
-cargo commands run with that version. Note that cargo will automatically install
-the correct version if it is not already installed.
+The `rust-toolchain.toml` file pins a specific rust version; cargo will install
+it automatically if needed.
 
-On Linux systems you may need to install libssl-dev, pkg-config, zlib1g-dev, protobuf etc.
+On Ubuntu you may also need:
 
-On Ubuntu:
 ```bash
-$ sudo apt-get update
-$ sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev
+sudo apt-get update
+sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev
 ```
 
 On Fedora:
+
 ```bash
-$ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang cmake make protobuf-devel protobuf-compiler perl-core libclang-dev
+sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang cmake make protobuf-devel protobuf-compiler perl-core libclang-dev
 ```
 
-## **2. Download the source code.**
+## 2. Get the source and build
 
 ```bash
-$ git clone https://github.com/anza-xyz/agave.git
-$ cd agave
-```
-
-## **3. Build.**
-
-```bash
-$ ./cargo build
+git clone https://github.com/gorbagana-dev/Gorbagana-Chain.git
+cd Gorbagana-Chain
+./cargo build --release
 ```
 
 > [!NOTE]
-> Note that this builds a debug version that is **not suitable for running a testnet or mainnet validator**. Please read [the install guide](https://docs.anza.xyz/cli/install#build-from-source) for instructions to build a release version for test and production uses.
+> A plain `./cargo build` produces a debug binary that is **not suitable for
+> running a real validator**. Use `--release` for test/production nodes.
 
-## **4. Grant capabilities for XDP (Linux-only).**
+## 3. Grant XDP capabilities (Linux only)
 
-XDP transmit is enabled on Linux by default and requires extra capabilities. After building, grant them to the validator binary:
-
-```bash
-$ sudo setcap 'cap_net_admin,cap_net_raw+eip' <path-to-agave-validator-binary>
-```
-
-For XDP zero-copy mode (`--xdp-zero-copy`), additional capabilities are needed:
+XDP transmit is enabled on Linux by default and needs extra capabilities:
 
 ```bash
-$ sudo setcap 'cap_net_admin,cap_net_raw,cap_bpf,cap_perfmon+eip' <path-to-agave-validator-binary>
+sudo setcap 'cap_net_admin,cap_net_raw+eip' <path-to-agave-validator-binary>
 ```
 
-# Testing
+# Running a single validator (trash node)
 
-**Run the test suite:**
+To relaunch Gorbagana as a single validator that carries over full account state
+at slot 0 with zero inflation, see [`relaunch/README.md`](relaunch/README.md).
 
-```bash
-$ ./cargo nextest run --profile ci  --cargo-profile ci --config-file .config/nextest.toml
-```
+# Community
 
-### Starting a local testnet
+- Website: https://www.gorbagana.wtf/#what-is-gor
+- Documentation: https://docs.gorbagana.wtf/
 
-Start your own testnet locally, instructions are in the [online docs](https://docs.anza.xyz/clusters/benchmark).
+# License
 
-### Accessing the remote development cluster
-
-* `devnet` - stable public cluster for development accessible via
-devnet.solana.com. Runs 24/7. Learn more about the [public clusters](https://docs.anza.xyz/clusters)
-
-# Benchmarking
-
-First, install the nightly build of rustc. `cargo bench` requires the use of the
-unstable features only available in the nightly build.
-
-```bash
-$ rustup install nightly
-```
-
-Run the benchmarks:
-
-```bash
-$ cargo +nightly bench
-```
-
-# Release Process
-
-The release process for this project is described [here](RELEASE.md).
-
-# Code coverage
-
-To generate code coverage statistics:
-
-```bash
-$ scripts/coverage.sh
-$ open target/cov/lcov-local/index.html
-```
-
-Why coverage? While most see coverage as a code quality metric, we see it primarily as a developer
-productivity metric. When a developer makes a change to the codebase, presumably it's a *solution* to
-some problem.  Our unit-test suite is how we encode the set of *problems* the codebase solves. Running
-the test suite should indicate that your change didn't *infringe* on anyone else's solutions. Adding a
-test *protects* your solution from future changes. Say you don't understand why a line of code exists,
-try deleting it and running the unit-tests. The nearest test failure should tell you what problem
-was solved by that code. If no test fails, go ahead and submit a Pull Request that asks, "what
-problem is solved by this code?" On the other hand, if a test does fail and you can think of a
-better way to solve the same problem, a Pull Request with your solution would most certainly be
-welcome! Likewise, if rewriting a test can better communicate what code it's protecting, please
-send us that patch!
+Apache-2.0. See [LICENSE](LICENSE).
