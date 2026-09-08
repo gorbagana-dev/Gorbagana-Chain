@@ -55,7 +55,7 @@ AGAVE_VALIDATOR="$(resolve_bin agave-validator)"
 SOLANA_KEYGEN="$(resolve_bin solana-keygen)"
 SOLANA_FAUCET="$(resolve_bin solana-faucet)"
 
-[[ -n "$AGAVE_VALIDATOR" ]] || die "agave-validator not found (build it: cargo build --release -p agave-validator)"
+[[ -n "$AGAVE_VALIDATOR" ]] || die "agave-validator not found. Build the single-node-locked binary via ./build-genesis.sh, or: GORB_SINGLE_NODE_IDENTITY=\$(solana-keygen pubkey $IDENTITY) cargo build --release -p agave-validator  (omit the env for a permissionless validator)"
 [[ -f "$LEDGER_DIR/genesis.bin" ]] || die "no genesis at $LEDGER_DIR — run ./build-genesis.sh first (or set LEDGER_DIR)"
 [[ -f "$IDENTITY" ]] || die "missing identity keypair $IDENTITY"
 [[ -f "$VOTE_ACCOUNT" ]] || die "missing vote keypair $VOTE_ACCOUNT"

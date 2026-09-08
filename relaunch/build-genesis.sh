@@ -32,15 +32,14 @@ WORK_LEDGER="${WORK_LEDGER:-$OUT_DIR/work-ledger}"
 PRIMORDIAL_DIR="${PRIMORDIAL_DIR:-$OUT_DIR/primordial}"
 ACCOUNTS_JSON="${ACCOUNTS_JSON:-$OUT_DIR/accounts-full.json}"
 
-// !TODO: Change the code for 500M SOL stakes @genesis/src/main
 CLUSTER_TYPE="${CLUSTER_TYPE:-mainnet-beta}"
-BOOTSTRAP_VALIDATOR_STAKE_SOL="${BOOTSTRAP_VALIDATOR_STAKE_SOL:-500000000}"
-BOOTSTRAP_VALIDATOR_LAMPORTS_SOL="${BOOTSTRAP_VALIDATOR_LAMPORTS_SOL:-500}"
-FAUCET_SOL="${FAUCET_SOL:-100000000}"
+BOOTSTRAP_VALIDATOR_STAKE_SOL="${BOOTSTRAP_VALIDATOR_STAKE_SOL:-1}"   # 500M (replaces old ~500M staked)
+BOOTSTRAP_VALIDATOR_LAMPORTS_SOL="${BOOTSTRAP_VALIDATOR_LAMPORTS_SOL:-500000000}"   # identity balance (pays vote fees)
+FAUCET_SOL="${FAUCET_SOL:-0}"                                                 # 0 keeps total supply ~1B (imported ~500M + 500M stake)
 TARGET_LAMPORTS_PER_SIGNATURE="${TARGET_LAMPORTS_PER_SIGNATURE:-5000}"
 FEE_BURN_PERCENTAGE="${FEE_BURN_PERCENTAGE:-0}"
-TICKS_PER_SLOT="${TICKS_PER_SLOT:-64}"
-HASHES_PER_TICK="${HASHES_PER_TICK:-sleep}"        # 'sleep' => no PoH hashing (low CPU)
+TICKS_PER_SLOT="${TICKS_PER_SLOT:-8}"              # 8 ticks x 6.25ms default tick = ~50ms slot
+HASHES_PER_TICK="${HASHES_PER_TICK:-sleep}"        # 'sleep' => sleep one tick duration (no PoH hashing, low CPU)
 MAX_GENESIS_ARCHIVE_UNPACKED_SIZE="${MAX_GENESIS_ARCHIVE_UNPACKED_SIZE:-1073741824}"
 
 # true => install curated $PROGRAMS_DIR/*.so instead of importing programs from the snapshot
@@ -48,6 +47,13 @@ INSTALL_PROGRAMS_FROM_SO="${INSTALL_PROGRAMS_FROM_SO:-false}"
 PROGRAMS_DIR="${PROGRAMS_DIR:-$REPO_DIR/relaunch/programs}"
 UPGRADE_AUTHORITY_KEYPAIR="${UPGRADE_AUTHORITY_KEYPAIR:-$CONFIG_DIR/upgrade-authority.json}"
 KEEP_STAKE_VOTE="${KEEP_STAKE_VOTE:-false}"
+
+# Single-node consensus lock: bake this chain's validator identity into agave-validator
+# so ONLY this node's stake ever counts toward consensus. No other validator can join,
+# and external stake can't dilute/stall it; balances stay liquid. Set false for a normal
+# permissionless validator. (Implemented in runtime/src/epoch_stakes.rs.)
+SINGLE_NODE_LOCK="${SINGLE_NODE_LOCK:-true}"
+
 PYTHON="${PYTHON:-python3}"
 
 log()  { printf '\033[1;36m[build-genesis]\033[0m %s\n' "$*"; }
@@ -81,6 +87,21 @@ ensure_binaries() {
   SOLANA_KEYGEN="$(resolve_bin solana-keygen)"
   LEDGER_TOOL="$(resolve_bin agave-ledger-tool)"
   [[ -n "$SOLANA_GENESIS" && -n "$LEDGER_TOOL" && -n "$SOLANA_KEYGEN" ]] || die "could not resolve required binaries after build"
+}
+
+# Build agave-validator with the single-node lock baked in (GORB_SINGLE_NODE_IDENTITY).
+# Must run AFTER ensure_keypairs so $IDENTITY exists. Ship the produced binary to the node;
+# if the validator is ever rebuilt without this env, the lock is lost.
+build_locked_validator() {
+  if [[ "$SINGLE_NODE_LOCK" != "true" ]]; then
+    warn "SINGLE_NODE_LOCK=false — building a normal permissionless validator (others can join with stake)"
+    ( cd "$REPO_DIR" && cargo build --release -p agave-validator ) || die "cargo build (agave-validator) failed"
+    return
+  fi
+  local id; id="$("$SOLANA_KEYGEN" pubkey "$IDENTITY")"
+  log "building agave-validator with single-node lock (identity $id) ..."
+  ( cd "$REPO_DIR" && GORB_SINGLE_NODE_IDENTITY="$id" cargo build --release -p agave-validator ) \
+    || die "cargo build (agave-validator, single-node lock) failed"
 }
 
 gen_keypair() {
@@ -225,6 +246,7 @@ create_genesis() {
 mkdir -p "$OUT_DIR"
 ensure_binaries
 ensure_keypairs
+build_locked_validator
 dump_accounts
 build_program_args
 convert_primordial
@@ -238,9 +260,12 @@ $(printf '\033[1;32m[build-genesis] SUCCESS\033[0m')
   bootstrap id    : $("$SOLANA_KEYGEN" pubkey "$IDENTITY")
   vote account    : $("$SOLANA_KEYGEN" pubkey "$VOTE")
   genesis hash    : ${GENESIS_HASH:-<run: agave-ledger-tool genesis-hash --ledger $LEDGER_DIR>}
+  single-node lock: $([[ "$SINGLE_NODE_LOCK" == "true" ]] && echo "ON (only $("$SOLANA_KEYGEN" pubkey "$IDENTITY") counts for consensus)" || echo "OFF (permissionless)")
 
 Next:
-  1. Copy '$LEDGER_DIR' and '$CONFIG_DIR' to the low-power node.
+  1. Copy '$LEDGER_DIR', '$CONFIG_DIR', and the built '$REPO_DIR/target/release/agave-validator' to the node.
   2. Run:  LEDGER_DIR=$LEDGER_DIR CONFIG_DIR=$CONFIG_DIR ./start-validator.sh
   3. Verify:  agave-ledger-tool capitalization --ledger $LEDGER_DIR
+$([[ "$SINGLE_NODE_LOCK" == "true" ]] && echo "  NOTE: only ship/run the agave-validator built above. Rebuilding it WITHOUT
+        GORB_SINGLE_NODE_IDENTITY set removes the single-node lock.")
 EOF

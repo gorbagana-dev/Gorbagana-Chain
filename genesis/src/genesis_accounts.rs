@@ -9,6 +9,7 @@ use {
 };
 
 // 9 month schedule is 100% after 9 months
+#[allow(dead_code)] // only used by the disabled add_genesis_stake_accounts (relaunch)
 const UNLOCKS_ALL_AT_9_MONTHS: UnlockInfo = UnlockInfo {
     cliff_fraction: 1.0,
     cliff_years: 0.75,
@@ -18,6 +19,7 @@ const UNLOCKS_ALL_AT_9_MONTHS: UnlockInfo = UnlockInfo {
 };
 
 // 9 month schedule is 50% after 9 months, then monthly for 2 years
+#[allow(dead_code)] // only used by the disabled add_genesis_stake_accounts (relaunch)
 const UNLOCKS_HALF_AT_9_MONTHS: UnlockInfo = UnlockInfo {
     cliff_fraction: 0.5,
     cliff_years: 0.75,
@@ -27,6 +29,7 @@ const UNLOCKS_HALF_AT_9_MONTHS: UnlockInfo = UnlockInfo {
 };
 
 // no lockups
+#[allow(dead_code)] // only used by the disabled add_genesis_stake_accounts (relaunch)
 const UNLOCKS_ALL_DAY_ZERO: UnlockInfo = UnlockInfo {
     cliff_fraction: 1.0,
     cliff_years: 0.0,
@@ -218,6 +221,7 @@ pub const COMMUNITY_STAKER_INFOS: &[StakerInfo] = &[
     },
 ];
 
+#[allow(dead_code)] // only used by the disabled add_genesis_stake_accounts (relaunch)
 fn add_stakes(
     genesis_config: &mut GenesisConfig,
     staker_infos: &[StakerInfo],
@@ -229,45 +233,51 @@ fn add_stakes(
         .sum::<u64>()
 }
 
-/// Add accounts that should be present in genesis; skip for development clusters
-pub fn add_genesis_stake_accounts(genesis_config: &mut GenesisConfig, mut issued_lamports: u64) {
+/// Add accounts that should be present in genesis; skip for development clusters.
+///
+/// DISABLED for the Gorbagana single-node relaunch: the Solana genesis stake
+/// distribution (creator/service/foundation/grants/community + the "one thanks"
+/// pool, ~500,000,000 SOL total) is intentionally NOT injected. Injecting it would
+/// inflate total supply to ~1.5B and hand 500M SOL to keys the relaunch operator
+/// does not control. Supply is kept at ~1,000,000,000 SOL (imported wallets +
+/// bootstrap validator stake). The original logic is preserved (commented) below.
+pub fn add_genesis_stake_accounts(genesis_config: &mut GenesisConfig, _issued_lamports: u64) {
     if genesis_config.cluster_type == ClusterType::Development {
         return;
     }
 
-    // add_stakes() and add_validators() award tokens for rent exemption and
-    //  to cover an initial transfer-free period of the network
-    issued_lamports += add_stakes(
-        genesis_config,
-        CREATOR_STAKER_INFOS,
-        &UNLOCKS_HALF_AT_9_MONTHS,
-    ) + add_stakes(
-        genesis_config,
-        SERVICE_STAKER_INFOS,
-        &UNLOCKS_ALL_AT_9_MONTHS,
-    ) + add_stakes(
-        genesis_config,
-        FOUNDATION_STAKER_INFOS,
-        &UNLOCKS_ALL_DAY_ZERO,
-    ) + add_stakes(genesis_config, GRANTS_STAKER_INFOS, &UNLOCKS_ALL_DAY_ZERO)
-        + add_stakes(
-            genesis_config,
-            COMMUNITY_STAKER_INFOS,
-            &UNLOCKS_ALL_DAY_ZERO,
-        );
-
-    // "one thanks" (community pool) gets 500_000_000SOL (total) - above distributions
-    create_and_add_stakes(
-        genesis_config,
-        &StakerInfo {
-            name: "one thanks",
-            staker: "7vEAL3nS9CWmy1q6njUUyHE7Cf5RmyQpND6CsoHjzPiR",
-            lamports: (500_000_000 * LAMPORTS_PER_SOL).saturating_sub(issued_lamports),
-            withdrawer: Some("3FFaheyqtyAXZSYxDzsr5CVKvJuvZD1WE1VEsBtDbRqB"),
-        },
-        &UNLOCKS_ALL_DAY_ZERO,
-        None,
-    );
+    // -- disabled for the single-node relaunch (keeps total supply at ~1B) --
+    // issued_lamports += add_stakes(
+    //     genesis_config,
+    //     CREATOR_STAKER_INFOS,
+    //     &UNLOCKS_HALF_AT_9_MONTHS,
+    // ) + add_stakes(
+    //     genesis_config,
+    //     SERVICE_STAKER_INFOS,
+    //     &UNLOCKS_ALL_AT_9_MONTHS,
+    // ) + add_stakes(
+    //     genesis_config,
+    //     FOUNDATION_STAKER_INFOS,
+    //     &UNLOCKS_ALL_DAY_ZERO,
+    // ) + add_stakes(genesis_config, GRANTS_STAKER_INFOS, &UNLOCKS_ALL_DAY_ZERO)
+    //     + add_stakes(
+    //         genesis_config,
+    //         COMMUNITY_STAKER_INFOS,
+    //         &UNLOCKS_ALL_DAY_ZERO,
+    //     );
+    //
+    // // "one thanks" (community pool) gets 500_000_000SOL (total) - above distributions
+    // create_and_add_stakes(
+    //     genesis_config,
+    //     &StakerInfo {
+    //         name: "one thanks",
+    //         staker: "7vEAL3nS9CWmy1q6njUUyHE7Cf5RmyQpND6CsoHjzPiR",
+    //         lamports: (500_000_000 * LAMPORTS_PER_SOL).saturating_sub(issued_lamports),
+    //         withdrawer: Some("3FFaheyqtyAXZSYxDzsr5CVKvJuvZD1WE1VEsBtDbRqB"),
+    //     },
+    //     &UNLOCKS_ALL_DAY_ZERO,
+    //     None,
+    // );
 }
 
 #[cfg(test)]
@@ -276,10 +286,12 @@ mod tests {
 
     #[test]
     fn test_add_genesis_stake_accounts() {
+        // Genesis stake distribution is disabled for the relaunch, so no stake
+        // accounts are injected for any cluster type (expected total: 0).
         let clusters_and_expected_lamports = [
-            (ClusterType::MainnetBeta, 500_000_000 * LAMPORTS_PER_SOL),
-            (ClusterType::Testnet, 500_000_000 * LAMPORTS_PER_SOL),
-            (ClusterType::Devnet, 500_000_000 * LAMPORTS_PER_SOL),
+            (ClusterType::MainnetBeta, 0),
+            (ClusterType::Testnet, 0),
+            (ClusterType::Devnet, 0),
             (ClusterType::Development, 0),
         ];
 

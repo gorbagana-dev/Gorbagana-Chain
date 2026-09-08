@@ -18,9 +18,54 @@ use {
         collections::HashMap,
         fmt,
         num::NonZero,
+        str::FromStr,
         sync::{Arc, OnceLock},
     },
 };
+
+/// Single-node consensus lock (Gorbagana relaunch).
+///
+/// When this crate is compiled with the `GORB_SINGLE_NODE_IDENTITY=<base58 pubkey>`
+/// environment variable set, only vote accounts whose validator identity equals that
+/// pubkey are counted toward epoch stakes (leader schedule + finality supermajority).
+///
+/// This makes the chain permanently single-node: no other validator can ever gain
+/// consensus weight, and no amount of externally-activated stake can dilute the lone
+/// validator below the 2/3 supermajority (so it can never be stalled). On-chain
+/// balances stay fully liquid and usable — holders simply cannot influence consensus.
+///
+/// When the env var is unset (all normal builds and the entire test suite), this
+/// returns `None` and behavior is completely unchanged.
+fn single_node_identity() -> Option<Pubkey> {
+    static CELL: OnceLock<Option<Pubkey>> = OnceLock::new();
+    *CELL.get_or_init(|| match option_env!("GORB_SINGLE_NODE_IDENTITY") {
+        Some(raw) if !raw.trim().is_empty() => {
+            let id = Pubkey::from_str(raw.trim())
+                .expect("GORB_SINGLE_NODE_IDENTITY must be a valid base58 pubkey");
+            log::warn!("single-node consensus lock ACTIVE: only validator identity {id} counts toward epoch stakes");
+            Some(id)
+        }
+        _ => None,
+    })
+}
+
+/// If the single-node lock is enabled, return a copy of `vote_accounts` containing
+/// only the locked identity's vote accounts. Returns `None` when the lock is off, or
+/// (defensively) when the filter would leave no vote accounts, so a misconfigured
+/// identity can never brick consensus by producing empty epoch stakes.
+fn single_node_filtered_vote_accounts(vote_accounts: &VoteAccounts) -> Option<VoteAccounts> {
+    let allowed = single_node_identity()?;
+    let filtered: VoteAccountsHashMap = vote_accounts
+        .as_ref()
+        .iter()
+        .filter(|(_vote_pubkey, (_stake, account))| *account.node_pubkey() == allowed)
+        .map(|(vote_pubkey, entry)| (*vote_pubkey, entry.clone()))
+        .collect();
+    if filtered.is_empty() {
+        return None;
+    }
+    Some(VoteAccounts::from(Arc::new(filtered)))
+}
 
 pub type NodeIdToVoteAccounts = HashMap<Pubkey, NodeVoteAccounts>;
 pub type EpochAuthorizedVoters = HashMap<Pubkey, Pubkey>;
@@ -237,7 +282,13 @@ impl From<DeserializableVersionedEpochStakes> for VersionedEpochStakes {
 impl VersionedEpochStakes {
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn new(stakes: SerdeStakesToStakeFormat, leader_schedule_epoch: Epoch) -> Self {
-        let stakes = EpochStakes::from(stakes);
+        let mut stakes = EpochStakes::from(stakes);
+        // Single-node consensus lock: keep only the locked identity's vote accounts so
+        // the leader schedule and finality math count that validator alone. No-op unless
+        // built with GORB_SINGLE_NODE_IDENTITY set. See `single_node_identity`.
+        if let Some(filtered) = single_node_filtered_vote_accounts(&stakes.vote_accounts) {
+            stakes.vote_accounts = filtered;
+        }
         let epoch_vote_accounts = stakes.vote_accounts();
         let (total_stake, node_id_to_vote_accounts, epoch_authorized_voters) =
             Self::parse_epoch_vote_accounts(epoch_vote_accounts.as_ref(), leader_schedule_epoch);
