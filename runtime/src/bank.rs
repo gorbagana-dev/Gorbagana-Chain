@@ -54,7 +54,7 @@ use {
         },
         epoch_stakes::{
             BLSPubkeyToRankMap, DeserializableVersionedEpochStakes, NodeVoteAccounts,
-            VersionedEpochStakes,
+            VersionedEpochStakes, single_node_filtered_vote_accounts_map,
         },
         inflation_rewards::points::InflationPointCalculationEvent,
         installed_scheduler_pool::{BankWithScheduler, InstalledSchedulerRwLock},
@@ -5757,7 +5757,10 @@ impl Bank {
     ///   attributed to each account
     pub fn vote_accounts(&self) -> Arc<VoteAccountsHashMap> {
         let stakes = self.stakes_cache.stakes();
-        Arc::from(stakes.vote_accounts())
+        // Single-node consensus lock: Tower and the commitment service derive `total_stake`
+        // from here, so foreign vote accounts must be dropped before they reach the 2/3
+        // threshold math. No-op unless built with GORB_SINGLE_NODE_IDENTITY set.
+        single_node_filtered_vote_accounts_map(Arc::from(stakes.vote_accounts()))
     }
 
     /// Vote account for the given vote account pubkey.

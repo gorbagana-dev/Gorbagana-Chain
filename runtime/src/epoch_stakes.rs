@@ -67,6 +67,38 @@ fn single_node_filtered_vote_accounts(vote_accounts: &VoteAccounts) -> Option<Vo
     Some(VoteAccounts::from(Arc::new(filtered)))
 }
 
+/// Same lock as [`single_node_filtered_vote_accounts`], for the raw map returned by
+/// `Bank::vote_accounts`.
+///
+/// `Bank::vote_accounts` reads the live (unfiltered) stakes cache and is what Tower and
+/// the commitment service use to compute `total_stake`, so the lock has to be applied
+/// here as well as in [`VersionedEpochStakes::new`]; otherwise externally-delegated stake
+/// lands in the denominator of the 2/3 vote threshold and can stop this node from voting.
+///
+/// Returns the input untouched when the lock is off, or when every entry already belongs
+/// to the locked identity, so the replay hot path does not allocate on a chain where the
+/// locked validator is the only voter.
+pub(crate) fn single_node_filtered_vote_accounts_map(
+    vote_accounts: Arc<VoteAccountsHashMap>,
+) -> Arc<VoteAccountsHashMap> {
+    let Some(allowed) = single_node_identity() else {
+        return vote_accounts;
+    };
+    if vote_accounts
+        .values()
+        .all(|(_stake, account)| *account.node_pubkey() == allowed)
+    {
+        return vote_accounts;
+    }
+    Arc::new(
+        vote_accounts
+            .iter()
+            .filter(|(_vote_pubkey, (_stake, account))| *account.node_pubkey() == allowed)
+            .map(|(vote_pubkey, entry)| (*vote_pubkey, entry.clone()))
+            .collect(),
+    )
+}
+
 pub type NodeIdToVoteAccounts = HashMap<Pubkey, NodeVoteAccounts>;
 pub type EpochAuthorizedVoters = HashMap<Pubkey, Pubkey>;
 
@@ -269,13 +301,17 @@ impl From<DeserializableVersionedEpochStakes> for VersionedEpochStakes {
             node_id_to_vote_accounts,
             epoch_authorized_voters,
         } = epoch_stakes;
-        Self::Current {
+        let mut epoch_stakes = Self::Current {
             stakes: stakes.into(),
             total_stake,
             node_id_to_vote_accounts: Arc::new(node_id_to_vote_accounts),
             epoch_authorized_voters: Arc::new(epoch_authorized_voters),
             bls_pubkey_to_rank_map: OnceLock::new(),
-        }
+        };
+        // Snapshot restore bypasses `Self::new`, so re-apply the single-node lock here or a
+        // snapshot written by an unlocked binary would reintroduce foreign stake.
+        epoch_stakes.apply_single_node_lock();
+        epoch_stakes
     }
 }
 
@@ -299,6 +335,50 @@ impl VersionedEpochStakes {
             epoch_authorized_voters: Arc::new(epoch_authorized_voters),
             bls_pubkey_to_rank_map: OnceLock::new(),
         }
+    }
+
+    /// Applies the single-node lock to already-built epoch stakes, for the snapshot
+    /// restore path that does not go through [`Self::new`].
+    ///
+    /// The dependent fields are re-derived from the surviving vote accounts, because
+    /// leaving the deserialized `total_stake` in place would keep foreign stake in the
+    /// denominator of the supermajority math even though `vote_accounts` was filtered.
+    /// No-op unless built with `GORB_SINGLE_NODE_IDENTITY` set.
+    fn apply_single_node_lock(&mut self) {
+        let Self::Current {
+            stakes,
+            total_stake,
+            node_id_to_vote_accounts,
+            epoch_authorized_voters,
+            bls_pubkey_to_rank_map,
+        } = self;
+        let Some(filtered) = single_node_filtered_vote_accounts(&stakes.vote_accounts) else {
+            return;
+        };
+        stakes.vote_accounts = filtered;
+        let kept = stakes.vote_accounts.as_ref();
+        // Matches `parse_epoch_vote_accounts`, which counts zero-stake entries too.
+        *total_stake = kept.values().map(|(stake, _account)| *stake).sum();
+        *node_id_to_vote_accounts = Arc::new(
+            node_id_to_vote_accounts
+                .iter()
+                .filter(|(_node_id, accounts)| {
+                    accounts
+                        .vote_accounts
+                        .iter()
+                        .any(|vote_pubkey| kept.contains_key(vote_pubkey))
+                })
+                .map(|(node_id, accounts)| (*node_id, accounts.clone()))
+                .collect(),
+        );
+        *epoch_authorized_voters = Arc::new(
+            epoch_authorized_voters
+                .iter()
+                .filter(|(vote_pubkey, _voter)| kept.contains_key(vote_pubkey))
+                .map(|(vote_pubkey, voter)| (*vote_pubkey, *voter))
+                .collect(),
+        );
+        *bls_pubkey_to_rank_map = OnceLock::new();
     }
 
     #[cfg(feature = "dev-context-only-utils")]

@@ -93,7 +93,9 @@ VALIDATOR_ARGS=(
   --no-wait-for-vote-to-start-leader
   --no-os-network-limits-test
   --enable-rpc-transaction-history
-  --full-snapshot-interval-slots "$FULL_SNAPSHOT_INTERVAL_SLOTS"
+  # With --no-incremental-snapshots, --full-snapshot-interval-slots is ignored and the
+  # *full* interval comes from --snapshot-interval-slots (default 200 slots = 10s here).
+  --snapshot-interval-slots "$FULL_SNAPSHOT_INTERVAL_SLOTS"
   --no-incremental-snapshots
   --limit-ledger-size "$LIMIT_LEDGER_SIZE"
   --max-genesis-archive-unpacked-size "$MAX_GENESIS_ARCHIVE_UNPACKED_SIZE"

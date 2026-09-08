@@ -33,9 +33,12 @@ PRIMORDIAL_DIR="${PRIMORDIAL_DIR:-$OUT_DIR/primordial}"
 ACCOUNTS_JSON="${ACCOUNTS_JSON:-$OUT_DIR/accounts-full.json}"
 
 CLUSTER_TYPE="${CLUSTER_TYPE:-mainnet-beta}"
-BOOTSTRAP_VALIDATOR_STAKE_SOL="${BOOTSTRAP_VALIDATOR_STAKE_SOL:-1}"   # 500M (replaces old ~500M staked)
-BOOTSTRAP_VALIDATOR_LAMPORTS_SOL="${BOOTSTRAP_VALIDATOR_LAMPORTS_SOL:-500000000}"   # identity balance (pays vote fees)
-FAUCET_SOL="${FAUCET_SOL:-0}"                                                 # 0 keeps total supply ~1B (imported ~500M + 500M stake)
+BOOTSTRAP_VALIDATOR_STAKE_SOL="${BOOTSTRAP_VALIDATOR_STAKE_SOL:-1}"   # activated stake (single-node lock makes size irrelevant to consensus)
+BOOTSTRAP_VALIDATOR_LAMPORTS_SOL="${BOOTSTRAP_VALIDATOR_LAMPORTS_SOL:-499999998}"   # identity balance (pays vote fees)
+# solana-genesis rejects --faucet-lamports 0 (is_non_zero validator + NonZeroU64), and
+# --faucet-pubkey has a default_value so the pair cannot be omitted. Keep this non-zero.
+# identity + stake + faucet = exactly 500,000,000 SOL, so total supply stays ~1B.
+FAUCET_SOL="${FAUCET_SOL:-1}"
 TARGET_LAMPORTS_PER_SIGNATURE="${TARGET_LAMPORTS_PER_SIGNATURE:-5000}"
 FEE_BURN_PERCENTAGE="${FEE_BURN_PERCENTAGE:-0}"
 TICKS_PER_SLOT="${TICKS_PER_SLOT:-8}"              # 8 ticks x 6.25ms default tick = ~50ms slot
