@@ -45,6 +45,29 @@ use {
 #[derive(Debug)]
 pub(crate) struct DisconnectedError;
 
+const NON_LEADER_RECEIVE_TIMEOUT: Duration = Duration::from_millis(10);
+const LEADER_IDLE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(1);
+
+fn idle_receive_timeout(
+    container_is_empty: bool,
+    decision: &BufferedPacketsDecision,
+) -> Option<Duration> {
+    if !container_is_empty {
+        return None;
+    }
+
+    match decision {
+        // A validator that is continuously leader otherwise polls try_recv() in a
+        // tight loop while idle. Keep this timeout short so completed worker jobs
+        // are still collected promptly; incoming packets wake the receiver early.
+        BufferedPacketsDecision::Consume(_) => Some(LEADER_IDLE_RECEIVE_TIMEOUT),
+        BufferedPacketsDecision::Forward | BufferedPacketsDecision::ForwardAndHold => {
+            Some(NON_LEADER_RECEIVE_TIMEOUT)
+        }
+        BufferedPacketsDecision::Hold => None,
+    }
+}
+
 /// Stats/metrics returned by `receive_and_buffer_packets`.
 pub(crate) struct ReceivingStats {
     pub num_received: usize,
@@ -122,7 +145,6 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
         } = self.sharable_banks.load();
 
         // Receive packet batches.
-        const RECV_TIMEOUT: Duration = Duration::from_millis(10);
         const PACKET_BURST_TIMEOUT: Duration = Duration::from_millis(1);
         const PACKET_BURST_LIMIT: usize = 1000;
         let start = Instant::now();
@@ -144,21 +166,11 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
             buffer_time_us: 0,
         };
 
-        // If not leader/unknown, do a blocking-receive initially. This lets
-        // the thread sleep until a message is received, or until the timeout.
-        // Additionally, only sleep if the container is empty.
+        // When idle, do a blocking receive until a packet arrives or the timeout
+        // expires. Leaders use a shorter timeout to preserve low scheduling latency.
         let mut timed_out = false;
-        if container.is_empty()
-            && matches!(
-                decision,
-                BufferedPacketsDecision::Forward | BufferedPacketsDecision::ForwardAndHold
-            )
-        {
-            // TODO: Is it better to manually sleep instead, avoiding the locking
-            //       overhead for wakers? But then risk not waking up when message
-            //       received - as long as sleep is somewhat short, this should be
-            //       fine.
-            match self.receiver.recv_timeout(RECV_TIMEOUT) {
+        if let Some(receive_timeout) = idle_receive_timeout(container.is_empty(), decision) {
+            match self.receiver.recv_timeout(receive_timeout) {
                 Ok(packet_batch_message) => {
                     received_message = true;
                     stats.accumulate(self.handle_packet_batch_message(
@@ -580,6 +592,33 @@ mod tests {
     }
 
     const TEST_CONTAINER_CAPACITY: usize = 100;
+
+    #[test]
+    fn test_idle_receive_timeout() {
+        let (bank_forks, _mint_keypair) = test_bank_forks();
+        let bank = bank_forks.read().unwrap().root_bank();
+
+        assert_eq!(
+            idle_receive_timeout(true, &BufferedPacketsDecision::Consume(bank)),
+            Some(LEADER_IDLE_RECEIVE_TIMEOUT)
+        );
+        assert_eq!(
+            idle_receive_timeout(true, &BufferedPacketsDecision::Forward),
+            Some(NON_LEADER_RECEIVE_TIMEOUT)
+        );
+        assert_eq!(
+            idle_receive_timeout(true, &BufferedPacketsDecision::ForwardAndHold),
+            Some(NON_LEADER_RECEIVE_TIMEOUT)
+        );
+        assert_eq!(
+            idle_receive_timeout(true, &BufferedPacketsDecision::Hold),
+            None
+        );
+        assert_eq!(
+            idle_receive_timeout(false, &BufferedPacketsDecision::Forward),
+            None
+        );
+    }
 
     fn setup_transaction_view_receive_and_buffer(
         receiver: Receiver<BankingPacketBatch>,
