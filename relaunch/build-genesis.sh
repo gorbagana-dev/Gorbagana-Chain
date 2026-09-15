@@ -63,11 +63,25 @@ log()  { printf '\033[1;36m[build-genesis]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[build-genesis][warn]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[build-genesis][error]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Fail on the cheap prerequisites before the 30-90 min build/dump, not after.
+preflight() {
+  command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust (see run.txt STEP 3)"
+  command -v "$PYTHON" >/dev/null 2>&1 || die "$PYTHON not found — needed for the primordial conversion"
+  [[ -f "$SCRIPT_DIR/convert_snapshot_to_primordial.py" ]] \
+    || die "missing $SCRIPT_DIR/convert_snapshot_to_primordial.py"
+  [[ -d "$BACKUP_LEDGER" ]] \
+    || die "backup ledger not found at $BACKUP_LEDGER — check the STEP 4 layout, or set BACKUP_DIR"
+  if ! "$PYTHON" -c 'import ijson' >/dev/null 2>&1; then
+    warn "python module 'ijson' not installed — the conversion will load the whole dump into RAM."
+    warn "  install it with: pip3 install ijson"
+  fi
+}
+
 # solana-genesis/keygen live in the main workspace; agave-ledger-tool in dev-bins.
 resolve_bin() {
-  local n="$1"
+  local n="$1" d
   for d in "$REPO_DIR/target/release" "$REPO_DIR/dev-bins/target/release"; do
-    [[ -x "$d/$1" ]] && { echo "$d/$1"; return; }
+    if [[ -x "$d/$n" ]]; then echo "$d/$n"; return; fi
   done
   command -v "$n" 2>/dev/null || true
 }
@@ -126,12 +140,21 @@ ensure_keypairs() {
   gen_keypair "$VOTE"
   gen_keypair "$STAKE"
   gen_keypair "$FAUCET"
-  [[ "$INSTALL_PROGRAMS_FROM_SO" == "true" ]] && gen_keypair "$UPGRADE_AUTHORITY_KEYPAIR"
+  # Must be a real `if`, not `[[ ... ]] && ...`: as the last statement in a function
+  # a false condition makes the function return 1, and `set -e` then aborts the whole
+  # script silently right after the keypairs are generated.
+  if [[ "$INSTALL_PROGRAMS_FROM_SO" == "true" ]]; then
+    gen_keypair "$UPGRADE_AUTHORITY_KEYPAIR"
+  fi
 }
 
 dump_accounts() {
-  if [[ -s "$ACCOUNTS_JSON" && "${REUSE_DUMP:-false}" == "true" ]]; then
-    log "reusing existing account dump: $ACCOUNTS_JSON"; return
+  if [[ "${REUSE_DUMP:-false}" == "true" ]]; then
+    if [[ -s "$ACCOUNTS_JSON" ]]; then
+      log "reusing existing account dump: $ACCOUNTS_JSON ($(du -h "$ACCOUNTS_JSON" | cut -f1))"
+      return
+    fi
+    warn "REUSE_DUMP=true but $ACCOUNTS_JSON is missing or empty — dumping from scratch"
   fi
   [[ -f "$BACKUP_LEDGER/genesis.bin" ]] || die "backup ledger not found at $BACKUP_LEDGER (need genesis.bin)"
 
@@ -142,20 +165,50 @@ dump_accounts() {
   # highest slot = incremental slot if present, else full slot
   hi_slot="$(ls "$BACKUP_LEDGER"/snapshots/incremental-snapshot-*.tar.zst 2>/dev/null \
              | sed -E 's/.*incremental-snapshot-[0-9]+-([0-9]+)-.*/\1/' | sort -n | tail -1)"
-  [[ -z "$hi_slot" ]] && hi_slot="$(basename "$snap" | sed -E 's/snapshot-([0-9]+)-.*/\1/')"
+  if [[ -z "$hi_slot" ]]; then
+    hi_slot="$(basename "$snap" | sed -E 's/snapshot-([0-9]+)-.*/\1/')"
+  fi
   log "snapshot tip slot: $hi_slot"
 
-  # Scratch copy so the backup stays pristine (ledger-tool writes a subdir).
+  # Scratch copy so the backup stays pristine: ledger-tool writes an accounts/ subdir,
+  # and --force-update-to-open below rewrites the blockstore in place.
   log "preparing scratch ledger copy at $WORK_LEDGER ..."
   rm -rf "$WORK_LEDGER"; mkdir -p "$WORK_LEDGER"
   cp "$BACKUP_LEDGER/genesis.bin" "$WORK_LEDGER/"
   cp -R "$BACKUP_LEDGER/snapshots" "$WORK_LEDGER/snapshots"
-  [[ -d "$BACKUP_LEDGER/rocksdb" ]] && cp -R "$BACKUP_LEDGER/rocksdb" "$WORK_LEDGER/rocksdb"
+  if [[ -d "$BACKUP_LEDGER/rocksdb" ]]; then
+    cp -R "$BACKUP_LEDGER/rocksdb" "$WORK_LEDGER/rocksdb"
+    # Stale secondary-mode state left by whichever version took the backup.
+    rm -rf "$WORK_LEDGER/rocksdb/solana-secondary"
+  fi
 
+  # --force-update-to-open: the backup blockstore was written by an older agave and is
+  # missing column families this ledger-tool requires (alt_meta, ...). Read-only access
+  # cannot create them, so the open aborts without this flag. Account data comes from the
+  # snapshot archives, not the blockstore -- the blockstore only has to open. Only the
+  # scratch copy is touched.
+  #
+  # Output goes to a .partial file so an aborted run never leaves a truncated
+  # accounts-full.json behind for a later REUSE_DUMP=true to silently pick up.
   log "dumping accounts with base64 data (slow step) ..."
-  "$LEDGER_TOOL" accounts --ledger "$WORK_LEDGER" --snapshots "$WORK_LEDGER/snapshots" \
-    --halt-at-slot "$hi_slot" --output json --encoding base64 > "$ACCOUNTS_JSON" \
-    || die "agave-ledger-tool accounts failed (likely snapshot-format incompatibility; see README)"
+  local tmp="$ACCOUNTS_JSON.partial"
+  rm -f "$tmp"
+  if ! "$LEDGER_TOOL" accounts \
+        --ledger "$WORK_LEDGER" \
+        --snapshots "$WORK_LEDGER/snapshots" \
+        --halt-at-slot "$hi_slot" \
+        --force-update-to-open \
+        --output json --encoding base64 > "$tmp"; then
+    rm -f "$tmp"
+    die "agave-ledger-tool accounts failed. If the error above is a snapshot deserialize
+       failure, redo the dump with a 3.0.x ledger-tool and re-run with REUSE_DUMP=true
+       (see run.txt, 'IF THE ACCOUNT DUMP STEP FAILS')."
+  fi
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    die "agave-ledger-tool accounts exited 0 but produced no output"
+  fi
+  mv -f "$tmp" "$ACCOUNTS_JSON"
   log "account dump written: $ACCOUNTS_JSON ($(du -h "$ACCOUNTS_JSON" | cut -f1))"
 }
 
@@ -186,7 +239,10 @@ BPF_PROGRAM_ARGS=()
 
 build_program_args() {
   : > "$INSTALL_IDS_FILE"
-  [[ "$INSTALL_PROGRAMS_FROM_SO" != "true" ]] && { log "importing ALL programs from snapshot (offline mode)"; return; }
+  if [[ "$INSTALL_PROGRAMS_FROM_SO" != "true" ]]; then
+    log "importing ALL programs from snapshot (offline mode)"
+    return
+  fi
 
   mkdir -p "$PROGRAMS_DIR"
   local upg_auth missing=() row id file type so
@@ -214,14 +270,28 @@ convert_primordial() {
   rm -rf "$PRIMORDIAL_DIR"; mkdir -p "$PRIMORDIAL_DIR"
   local args=("$SCRIPT_DIR/convert_snapshot_to_primordial.py" "$ACCOUNTS_JSON"
               --out-dir "$PRIMORDIAL_DIR" --prefix primordial)
-  [[ -s "$INSTALL_IDS_FILE" ]] && args+=(--install-program-ids-file "$INSTALL_IDS_FILE")
-  [[ "$KEEP_STAKE_VOTE" == "true" ]] && args+=(--keep-stake-vote)
+  if [[ -s "$INSTALL_IDS_FILE" ]]; then
+    args+=(--install-program-ids-file "$INSTALL_IDS_FILE")
+  fi
+  if [[ "$KEEP_STAKE_VOTE" == "true" ]]; then
+    args+=(--keep-stake-vote)
+  fi
   "$PYTHON" "${args[@]}" || die "primordial conversion failed"
 }
 
 create_genesis() {
   rm -rf "$LEDGER_DIR"; mkdir -p "$LEDGER_DIR"
   local cmd f
+
+  # An unmatched glob would otherwise expand to itself and be handed to
+  # solana-genesis as a nonexistent --primordial-accounts-file path.
+  local primordial_files
+  shopt -s nullglob
+  primordial_files=("$PRIMORDIAL_DIR"/primordial-*.yml)
+  shopt -u nullglob
+  [[ ${#primordial_files[@]} -gt 0 ]] \
+    || die "no primordial-*.yml chunks in $PRIMORDIAL_DIR — the conversion produced nothing"
+
   cmd=(
     "$SOLANA_GENESIS"
     --ledger "$LEDGER_DIR"
@@ -239,14 +309,17 @@ create_genesis() {
     --faucet-lamports "$(( FAUCET_SOL * 1000000000 ))"
     --max-genesis-archive-unpacked-size "$MAX_GENESIS_ARCHIVE_UNPACKED_SIZE"
   )
-  for f in "$PRIMORDIAL_DIR"/primordial-*.yml; do cmd+=(--primordial-accounts-file "$f"); done
-  [[ ${#BPF_PROGRAM_ARGS[@]} -gt 0 ]] && cmd+=("${BPF_PROGRAM_ARGS[@]}")
+  for f in "${primordial_files[@]}"; do cmd+=(--primordial-accounts-file "$f"); done
+  if [[ ${#BPF_PROGRAM_ARGS[@]} -gt 0 ]]; then
+    cmd+=("${BPF_PROGRAM_ARGS[@]}")
+  fi
 
-  log "creating genesis (inflation=none, cluster=$CLUSTER_TYPE, stake=${BOOTSTRAP_VALIDATOR_STAKE_SOL} SOL) ..."
+  log "creating genesis from ${#primordial_files[@]} primordial chunk(s) (inflation=none, cluster=$CLUSTER_TYPE, stake=${BOOTSTRAP_VALIDATOR_STAKE_SOL} SOL) ..."
   "${cmd[@]}" || die "solana-genesis failed"
 }
 
 mkdir -p "$OUT_DIR"
+preflight
 ensure_binaries
 ensure_keypairs
 build_locked_validator

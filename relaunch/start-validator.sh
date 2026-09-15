@@ -30,7 +30,9 @@ FAUCET_KEYPAIR="${FAUCET_KEYPAIR:-$CONFIG_DIR/faucet-keypair.json}"
 # --- network -------------------------------------------------------------- #
 RPC_PORT="${RPC_PORT:-8899}"
 GOSSIP_PORT="${GOSSIP_PORT:-8001}"
-DYNAMIC_PORT_RANGE="${DYNAMIC_PORT_RANGE:-8002-8020}"
+# Half-open [min,max), and agave rejects anything narrower than
+# MINIMUM_VALIDATOR_PORT_RANGE_WIDTH (26). 8002-8032 leaves a little headroom.
+DYNAMIC_PORT_RANGE="${DYNAMIC_PORT_RANGE:-8002-8032}"
 RPC_BIND_ADDRESS="${RPC_BIND_ADDRESS:-0.0.0.0}"
 FAUCET_PORT="${FAUCET_PORT:-9900}"
 ENABLE_FAUCET="${ENABLE_FAUCET:-true}"
@@ -38,17 +40,35 @@ ENABLE_FAUCET="${ENABLE_FAUCET:-true}"
 # --- low-power / snapshot tuning ------------------------------------------ #
 export RUST_LOG="${RUST_LOG:-info}"
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-2}"
-LIMIT_LEDGER_SIZE="${LIMIT_LEDGER_SIZE:-50000000}"
+# A SHRED COUNT, not bytes and not a time window. 50,000,000 is not a tuning choice:
+# it is DEFAULT_MIN_MAX_LEDGER_SHREDS, the hard floor enforced in
+# ledger/src/blockstore_cleanup_service.rs. The validator REFUSES TO START below it
+# ("--limit-ledger-size value was too small"). Upstream budgets it at ~100 GB; this
+# chain measures ~116 GB steady state, because every slot costs a fixed ~75 KB of
+# data+code shreds regardless of content and we produce slots ~7x faster than mainnet.
+# Going lower requires patching that constant and rebuilding the validator.
+LIMIT_LEDGER_SIZE="${LIMIT_LEDGER_SIZE:-50000000}"    # the minimum the binary accepts
 FULL_SNAPSHOT_INTERVAL_SLOTS="${FULL_SNAPSHOT_INTERVAL_SLOTS:-25000}"
 MAX_GENESIS_ARCHIVE_UNPACKED_SIZE="${MAX_GENESIS_ARCHIVE_UNPACKED_SIZE:-1073741824}"
+
+# The banking tracer writes ~1 GB event files for simulate-leader-blocks replay and
+# retains ~13 GB by default. Useful for debugging block production, dead weight
+# otherwise. Set true to re-enable.
+ENABLE_BANKING_TRACE="${ENABLE_BANKING_TRACE:-false}"
 
 log()  { printf '\033[1;36m[validator]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[validator][error]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# BIN_DIR lets a deployed copy (see install-service.sh) run from pinned binaries
+# outside the repo, so rebuilding the checkout cannot swap the running validator --
+# which matters because the single-node lock is compiled into that specific binary.
+BIN_DIR="${BIN_DIR:-}"
+
 resolve_bin() {
-  local n="$1"
-  [[ -x "$REPO_DIR/target/release/$n" ]]          && { echo "$REPO_DIR/target/release/$n"; return; }
-  [[ -x "$REPO_DIR/dev-bins/target/release/$n" ]] && { echo "$REPO_DIR/dev-bins/target/release/$n"; return; }
+  local n="$1" d
+  for d in ${BIN_DIR:+"$BIN_DIR"} "$REPO_DIR/target/release" "$REPO_DIR/dev-bins/target/release"; do
+    if [[ -x "$d/$n" ]]; then echo "$d/$n"; return; fi
+  done
   command -v "$n" 2>/dev/null || true
 }
 AGAVE_VALIDATOR="$(resolve_bin agave-validator)"
@@ -75,8 +95,15 @@ if [[ "$ENABLE_FAUCET" == "true" && -f "$FAUCET_KEYPAIR" && -n "$SOLANA_FAUCET" 
   FAUCET_PID=$!
 fi
 
+# NOTE: this script ends in `exec`, which replaces the shell and DISCARDS these traps.
+# They only cover a failure between here and the exec. Cleanup of the faucet after the
+# validator exits is therefore NOT the script's job:
+#   - under systemd, KillMode=control-group tears down the whole cgroup (see
+#     gorbagana.service), which is the reliable path and why the unit is preferred;
+#   - run by hand, a faucet started here outlives the validator and must be killed
+#     manually, so set ENABLE_FAUCET=false unless you actually want one.
 cleanup() { log "shutting down"; [[ -n "$FAUCET_PID" ]] && kill "$FAUCET_PID" 2>/dev/null || true; }
-trap cleanup INT TERM EXIT
+trap cleanup INT TERM
 
 VALIDATOR_ARGS=(
   --identity "$IDENTITY"
@@ -90,6 +117,10 @@ VALIDATOR_ARGS=(
   --gossip-port "$GOSSIP_PORT"
   --dynamic-port-range "$DYNAMIC_PORT_RANGE"
   --allow-private-addr
+  # --allow-private-addr declares .requires("no_xdp"), so this is mandatory, not optional.
+  # XDP transmit also wants CAP_NET_ADMIN and a dedicated CPU core; a single-node chain
+  # has no use for it, so fall back to plain UDP sockets.
+  --no-xdp
   --no-wait-for-vote-to-start-leader
   --no-os-network-limits-test
   --enable-rpc-transaction-history
@@ -100,6 +131,14 @@ VALIDATOR_ARGS=(
   --limit-ledger-size "$LIMIT_LEDGER_SIZE"
   --max-genesis-archive-unpacked-size "$MAX_GENESIS_ARCHIVE_UNPACKED_SIZE"
 )
+# Default is nproc workers + nproc/4 blocking threads. Account scans
+# (getProgramAccounts) occupy the blocking pool; keep it from starving getBlock.
+[[ -n "${RPC_THREADS:-}" ]] && VALIDATOR_ARGS+=(--rpc-threads "$RPC_THREADS")
+[[ -n "${RPC_BLOCKING_THREADS:-}" ]] && VALIDATOR_ARGS+=(--rpc-blocking-threads "$RPC_BLOCKING_THREADS")
+[[ -n "${ACCOUNTS_INDEX_SCAN_RESULTS_LIMIT_MB:-}" ]] && VALIDATOR_ARGS+=(--accounts-index-scan-results-limit-mb "$ACCOUNTS_INDEX_SCAN_RESULTS_LIMIT_MB")
+if [[ "$ENABLE_BANKING_TRACE" != "true" ]]; then
+  VALIDATOR_ARGS+=(--disable-banking-trace)
+fi
 [[ -n "$FAUCET_PID" ]] && VALIDATOR_ARGS+=(--rpc-faucet-address "127.0.0.1:$FAUCET_PORT")
 
 # extra ad-hoc args, e.g. VALIDATOR_ARGS_EXTRA="--rpc-pubsub-enable-block-subscription"

@@ -1,0 +1,63 @@
+[Unit]
+Description=Gorbagana single-node validator
+Documentation=file://__BIN_DIR__/run.txt
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+
+# Pinned binaries + data live outside the git checkout, so rebuilding or cleaning
+# the repo cannot swap the locked validator binary or delete the chain.
+Environment=BIN_DIR=__BIN_DIR__
+Environment=LEDGER_DIR=__DATA_DIR__/ledger
+Environment=CONFIG_DIR=__DATA_DIR__/config
+# solana_metrics emits a "datapoint:" line per slot per subsystem -- ~75% of all output,
+# and useless unless SOLANA_METRICS_CONFIG ships them somewhere. Dropping them takes the
+# log from ~19 GB/day to ~5 GB/day, which is the difference between hours and a day of
+# retention inside journald's default 4G cap. Set RUST_LOG=info to get them back.
+Environment=RUST_LOG=info,solana_metrics::metrics=warn
+
+# The faucet is a separate process the launcher cannot reap (it ends in exec).
+# KillMode=control-group below cleans it up, but leave it off unless it is wanted.
+Environment=ENABLE_FAUCET=false
+
+# Ledger retention in SHREDS. 50000000 is the hard floor (DEFAULT_MIN_MAX_LEDGER_SHREDS);
+# the validator refuses to start below it. That is ~116 GB of rocksdb on this chain.
+# Raising it gives deeper getBlock/getTransaction history at ~2.3 GB per million shreds.
+Environment=LIMIT_LEDGER_SIZE=50000000
+
+# ~13 GB of leader-block simulation traces nobody is reading.
+Environment=ENABLE_BANKING_TRACE=false
+
+# Default blocking pool is nproc/4 (=2 on this box). Account-index-less
+# getProgramAccounts occupies those threads and getBlock appears "stuck".
+Environment=RPC_THREADS=8
+Environment=RPC_BLOCKING_THREADS=8
+Environment=ACCOUNTS_INDEX_SCAN_RESULTS_LIMIT_MB=64
+
+WorkingDirectory=__DATA_DIR__
+ExecStart=__BIN_DIR__/start-validator.sh
+
+Restart=always
+RestartSec=5
+
+# The validator raises its own soft limit at startup but cannot exceed the hard limit.
+LimitNOFILE=1000000
+
+# Stopping a validator mid-slot is normal, but give rocksdb time to flush cleanly
+# rather than being SIGKILLed into a recovery-on-next-boot situation.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# journald handles rotation; the raw stdout log was growing ~19 GB/day unbounded.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gorbagana
+
+[Install]
+WantedBy=multi-user.target
